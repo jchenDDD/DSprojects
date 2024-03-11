@@ -1,0 +1,192 @@
+---
+title: "Assignment 3"
+author: "John Chen"
+date: "March 01, 2024"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    theme: cerulean
+    highlight: tango
+    css: styles.css
+    fig_caption: true
+    self_contained: true
+link-citations: true
+---
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+packages <- c("dplyr","tidyverse", "DBI", "RSQLite", "lubridate", "hms", "kableExtra","gridExtra","vtable","knitr", "broom", "leaflet","leaflet.extras","MASS")
+for(p in packages){
+ if(!require(p, character.only = TRUE)){
+  install.packages(p) 
+ }
+ library(p, character.only = TRUE)
+}
+```
+
+```{r echo=FALSE}
+db <- dbConnect(RSQLite::SQLite(), "FPA_FOD_20170508.sqlite")
+query <- "SELECT * FROM Fires"
+result <- dbGetQuery(db, query)
+dbDisconnect(db)
+```
+
+# Introduction
+
+This report aims to answer the question: When and where do most large wild fires occur? The [Fire Program Analysis fire-occurrence database](https://www.kaggle.com/datasets/rtatman/188-million-us-wildfires?rvi=1) 1.88 million recorded wild fires in the US from 1992 to 2015. The interest for this investigation was sparked by an sudden increase of wild fires around the world. I wish to examine the pattern in frequencies, more importantly, the irregularities in frequency of occurrences. It is expected that frequencies are impacted by the occurrences of other environmental disasters, like rains and hurricanes. This report is only meant to gain basic insight into the frequencies of fires throughout a long period of time. 
+This data set contains the discovery date of the fire, the acres burned, location of the fire, and the cause of fire. The fire size is recorded in acres and split into alphabetical categories of A - G.
+
+```{r echo=FALSE, results='hide'}
+wildfire <- subset(result, select=-Shape)
+wildfire
+```
+```{r}
+julian_origin <- lubridate::ymd("0000-11-25") - lubridate::years(4713)
+wildfire$DISCOVERY_DATE <- as.Date(wildfire$DISCOVERY_DATE, origin = julian_origin)
+wildfire$DISCOVERY_TIME <- hm(format(strptime(wildfire$DISCOVERY_TIME, "%H%M"),format="%H:%M"))
+
+wildfire$CONT_DATE <- as.Date(wildfire$CONT_DATE, origin = julian_origin)
+wildfire$CONT_TIME <- hm(format(strptime(wildfire$CONT_TIME, "%H%M"),format="%H:%M"))
+```
+```{r}
+wildfire <- wildfire[c("STATE","FIRE_YEAR","DISCOVERY_DATE","DISCOVERY_DOY","DISCOVERY_TIME", "STAT_CAUSE_DESCR","CONT_DATE","CONT_DOY","CONT_TIME", "FIRE_SIZE", "FIRE_SIZE_CLASS", "LATITUDE", "LONGITUDE", "COUNTY")]
+kable(head(wildfire,1000), caption = "1000 observations from the dataset") %>%
+  kable_styling(bootstrap_options = "striped") %>%
+  scroll_box(height = "200px", width = "100%")
+```
+
+# Method
+Based on Kaggle source, this data is collected from records of federal, state, and local fire organizations. Redundant or duplicated data were removed, to the degree possible. The data was simplified by reformating the Julian dates into calendar time series and individual columns of year, month, and day.
+I then kept all variables that were irrelevant to the question of interest: the State that the fire was in, year of the fire, the discovery date of the fire, the discovery time of the fire, the cause code of the fire, the cause of the fire, latitude, longitude, contained date, contained time, fire size, fire size class, county.
+I will create a variable for season based on discovery date to also examine which season has the most wild fire.
+
+To examine patterns in wild fire frequency, I will make histogram of year to see if there is an increasing or decreasing pattern. If there is an increasing pattern, it supports the claim that frequency of wild fire increases throughout time(both year and season will be examined). Spatial plots will be used to see the location of wild fire hot spots in the US during the time that would be concluded as the worst fire season. 
+A chi-square test will be conducted on causes and season to see if there are any correlation. If there are, we should identify the combination of the two that relatively causes the most fires.
+Since wild fires is a good fit for poisson distribution, I will use GLM to examine which values of variables generates the most amount of wild fire.
+
+# Results
+```{r echo=FALSE, results='hide'}
+wildfire %>%
+  filter(is.na(CONT_DATE)) %>%
+  ggplot() + geom_bar(aes(x=FIRE_SIZE_CLASS)) + labs(main = "Missing contained date by fire size class")
+wildfire <- wildfire %>%
+  mutate(
+    CONT_DATE = as.Date(ifelse(is.na(CONT_DATE), DISCOVERY_DATE, CONT_DATE)),
+    CONT_DOY = ifelse(is.na(CONT_DOY), DISCOVERY_DOY, CONT_DOY)
+  )
+summary(wildfire)
+```
+```{r}
+wildfire <- wildfire %>%
+  mutate(
+    SEASON = case_when(
+      month(DISCOVERY_DATE) %in% c(12,1,2) ~ "winter",
+      month(DISCOVERY_DATE) %in% 3:5 ~ "spring",
+      month(DISCOVERY_DATE) %in% 6:8 ~ "summer",
+      month(DISCOVERY_DATE) %in% 9:11 ~ "fall"
+    )
+  )
+wildfire$SEASON <- factor(wildfire$SEASON, levels = c("spring", "summer", "fall", "winter"))
+wildfire$STAT_CAUSE_DESCR <- factor(wildfire$STAT_CAUSE_DESCR)
+wildfire$FIRE_SIZE_CLASS <- factor(wildfire$FIRE_SIZE_CLASS, levels = c("A", "B", "C", "D", "E", "F", "G"))
+
+```
+```{r fig.cap="Figure 1"}
+wildfire %>%
+  ggplot() +
+  geom_bar(aes(x=FIRE_YEAR),position="identity", alpha=0.4) +
+  labs(x="YEAR", title = "Frequency of Fire")
+wildfire %>%
+  ggplot() +
+  geom_bar(aes(x=FIRE_YEAR,fill=STAT_CAUSE_DESCR),position="identity", alpha=0.4) +
+  labs(x="YEAR", title = "Frequency throughout the Years by Fire Cause", fill="Cause")
+```
+
+The frequencies of fire has not increased throughout the years. There does not seem to be a pattern for any distribution. 
+
+## Which combination of season and causation has the highest frequency?
+```{r fig.width=10}
+wildfire %>%
+  ggplot() +
+  geom_bar(aes(x=FIRE_YEAR),position="identity", alpha=0.4) +
+  labs(x="YEAR", title = "Frequency of Fire") + 
+  facet_grid(SEASON ~ STAT_CAUSE_DESCR) +
+  theme(text = element_text(size = 7)) +
+  coord_fixed(ratio = 2/800) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Lightning causes frequencies of fire to peak in the summer. This makes sense since the occurrence of thunderstorms are most frequent during summer. As opposed to winter where there's almost no thunderstorms. This can be underlying an independence between season and causations.
+I will perform a chi-square test to test the independence of the two variables.
+```{r}
+con <- table(wildfire$STAT_CAUSE_DESCR, wildfire$SEASON)
+matrix <- apply(as.matrix.noquote(con),2,as.numeric)
+chi <- chisq.test(con)
+tidy_chi <- tidy(chi)
+tidy_chi <- subset(tidy_chi, select = -method)
+kable(tidy_chi, format = "markdown", col.names = c("chi-squared statistic", "p-value", "degrees of freedom")) %>%
+  kable_styling(full_width = FALSE) %>%
+  column_spec(2, bold = TRUE, color = "red") %>%
+  add_header_above(c("Pearson's chi square test"=3))
+```
+
+Based on a p-value smaller than 2.2e-16 from chi-sqaure, we can reject the null that season is independent from cause. This supports the fact that there is a relation between season and causation.
+```{r}
+wildfire %>%
+  ggplot(aes(x=STAT_CAUSE_DESCR, fill=SEASON)) +
+  geom_bar(position="dodge") +
+  labs(title = "Causation by season", x = "Causes") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+The frequency of fire is the highest during summer caused by lightning.
+
+## Cluster Map for Large Fires (100+ acres)
+```{r message=FALSE, warning=FALSE}
+large_wildfire <- wildfire %>% 
+  filter(!FIRE_SIZE_CLASS %in% c("A","B","C"))
+leaflet(large_wildfire) %>%
+  addTiles() %>%
+  addHeatmap(radius = 6) %>%
+  addMarkers(clusterOptions = markerClusterOptions()) %>%
+  setView(lat=32.779167, lng=-96.808891 ,zoom=6)
+```
+
+I plotted all 54,093	them on a clustered map. There is a larger amount of fires concentrated as we get closer to the equator. As you zoom in, you can see that the fires are most concentrated around Dallas, Texas. The heat map shows that the fires are concentrated around the city. Not wild fires ever happens in the city.
+
+## GLM on fire size
+```{r message=FALSE}
+wildfire$LogFireSize <- log(wildfire$FIRE_SIZE)
+wildfire %>%
+  ggplot() + geom_histogram(aes(x=LogFireSize, fill = FIRE_SIZE_CLASS)) +
+  labs(x="log(Fire Size)", title = "Distribution of log(Fire Size)", fill="Fire Size Class")
+```
+
+The fire size of the distribution was extremely right skewed, so I applied log transformation to try to normalize the distribution. The distribution of of fire size seems to share a poisson distribution based on the histogram of Log Fire Size. 
+Fire size was then split into 30 bins and fitted against year with the link function being log. 
+```{r message=FALSE, warning=FALSE}
+y <- wildfire$LogFireSize
+wildfire$LogFireInBins <- cut(y, breaks = seq(min(y),max(y), length.out=31), include.lowest = FALSE,labels=FALSE)
+x <- wildfire$FIRE_YEAR
+ggplot(wildfire, aes(x = FIRE_YEAR, y = LogFireInBins)) +
+  geom_point() +
+  geom_smooth(method = "glm", method.args = list(family = "poisson"), se = FALSE) +
+  labs(x="Year", y="Fire Size", title="GLM of Fire Size against Year")
+```
+
+Based on the regression, fire size seems to stay the same throughout the years. There is no indication that fire size increases. 
+
+```{r}
+model_stat <- tidy(summary(lm(data=wildfire, LogFireSize ~ SEASON + STAT_CAUSE_DESCR)))
+kable(model_stat, caption = 'Model Fits') %>%
+  kable_styling(bootstrap_options = "striped")
+```
+
+The only coefficient that seems to increase fire size is the winter indicator. This indicates that fire size tends to increase during the winter. This could be due to the distribution of small wild fires vs large wild fires for each season, ie. wild fire is a lot more frequent in other seasons. Overall, debris burning seems to cause larger wild fires than all other causes. However, we know that season is likely related to causes and that violates one of the assumptions for linear regression. The interpretation of this model should be read cautiously. 
+
+# Conclusion
+To address our question of interest, we observed that wildfires are most frequent during the summer, often caused by lightning. The highest concentration of wildfires occurs around Dallas, Texas. The most significant indicators for wildfire frequency in this dataset are the time of the year and the causes of the fires. There is no indication that fire size increases over time, and there is no discernible trend of increasing wildfire frequency from 1998 to 2015.
+
+If there was an abnormal number of wildfires last year, it would manifest as a sudden increase in frequency, not following the previous trend. As for concerns about a high number of wildfires this year, it's not an immediate cause for worry based on the historical data. However, if there are a lot of wildfires this year, I suggest that this matter should be further investigated.
+
